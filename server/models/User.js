@@ -43,6 +43,26 @@ const UserSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  vibesCount: {
+    type: Number,
+    default: 0,
+  },
+  circlesCount: {
+    type: Number,
+    default: 0,
+  },
+  followers: {
+    type: [String],
+    default: [],
+  },
+  following: {
+    type: [String],
+    default: [],
+  },
+  isDeactivated: {
+    type: Boolean,
+    default: false,
+  },
   location: {
     type: {
       type: String,

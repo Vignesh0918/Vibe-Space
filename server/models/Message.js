@@ -30,6 +30,22 @@ const MessageSchema = new mongoose.Schema({
     type: Date,
     index: { expires: 0 }, // Automatically delete when this date is reached
   },
+  isEdited: {
+    type: Boolean,
+    default: false,
+  },
+  editedAt: {
+    type: Date,
+  },
+  readBy: {
+    type: [String],
+    default: [],
+  },
+  reactions: {
+    type: Map,
+    of: [String],
+    default: {},
+  },
 }, {
   timestamps: true,
 });

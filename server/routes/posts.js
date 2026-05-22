@@ -9,6 +9,18 @@ const authMiddleware = require('../middleware/auth');
 const { z } = require('zod');
 const validate = require('../middleware/validate');
 
+const editPostSchema = z.object({
+  body: z.object({
+    caption: z.string().min(1)
+  })
+});
+
+const bookmarkSchema = z.object({
+  params: z.object({
+    postId: z.string().min(1)
+  })
+});
+
 const createPostSchema = z.object({
   body: z.object({
     caption: z.string().optional().nullable(),
@@ -289,6 +301,104 @@ router.delete('/:postId', authMiddleware, async (req, res) => {
     await Post.findByIdAndDelete(postId);
 
     return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get user's bookmarked posts
+router.get('/bookmarked/:userId', authMiddleware, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const posts = await Post.find({ bookmarkedBy: userId }).sort({ createdAt: -1 });
+    return res.json({ success: true, data: posts });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get trending posts last 24h
+router.get('/trending', authMiddleware, async (req, res) => {
+  try {
+    const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    let posts = await Post.find({ createdAt: { $gte: last24h } });
+
+    const getReactionsCount = (post) => {
+      let count = 0;
+      if (post.reactions) {
+        if (post.reactions instanceof Map) {
+          post.reactions.forEach(usersList => {
+            count += (usersList || []).length;
+          });
+        } else {
+          Object.values(post.reactions).forEach(usersList => {
+            count += (usersList || []).length;
+          });
+        }
+      }
+      return count;
+    };
+
+    posts.sort((a, b) => getReactionsCount(b) - getReactionsCount(a));
+
+    if (posts.length === 0) {
+      posts = await Post.find().limit(20);
+      posts.sort((a, b) => getReactionsCount(b) - getReactionsCount(a));
+    }
+
+    return res.json({ success: true, data: posts.slice(0, 10) });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Bookmark / unbookmark toggle
+router.post('/:postId/bookmark', authMiddleware, validate(bookmarkSchema), async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const userId = req.user.uid;
+
+    const post = await Post.findById(postId);
+    if (!post) {
+      return res.status(404).json({ success: false, error: 'Post not found' });
+    }
+
+    let isBookmarked = false;
+    if (post.bookmarkedBy.includes(userId)) {
+      post.bookmarkedBy = post.bookmarkedBy.filter(id => id !== userId);
+    } else {
+      post.bookmarkedBy.push(userId);
+      isBookmarked = true;
+    }
+
+    await post.save();
+    return res.json({ success: true, isBookmarked, bookmarkedBy: post.bookmarkedBy });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Edit post caption
+router.put('/:postId', authMiddleware, validate(editPostSchema), async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const { caption } = req.body;
+    const userId = req.user.uid;
+
+    const post = await Post.findById(postId);
+    if (!post) {
+      return res.status(404).json({ success: false, error: 'Post not found' });
+    }
+
+    if (post.userId !== userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    post.caption = caption;
+    post.isEdited = true;
+    await post.save();
+
+    return res.json({ success: true, data: post });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }

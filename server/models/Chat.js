@@ -33,6 +33,18 @@ const ChatSchema = new mongoose.Schema({
     of: Number, // UID -> count of unread messages
     default: {},
   },
+  groupAvatar: {
+    type: String,
+    default: '',
+  },
+  pinnedMessageId: {
+    type: String,
+    default: '',
+  },
+  adminIds: {
+    type: [String],
+    default: [],
+  },
 }, {
   timestamps: true,
 });

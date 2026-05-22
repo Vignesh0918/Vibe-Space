@@ -36,6 +36,14 @@ const PostSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  bookmarkedBy: {
+    type: [String],
+    default: [],
+  },
+  isEdited: {
+    type: Boolean,
+    default: false,
+  },
 }, {
   timestamps: true,
 });

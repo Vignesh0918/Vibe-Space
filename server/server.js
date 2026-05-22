@@ -13,6 +13,9 @@ const chatsRoutes = require('./routes/chats');
 const storiesRoutes = require('./routes/stories');
 const notificationsRoutes = require('./routes/notifications');
 const uploadRoutes = require('./routes/upload');
+const vibesRoutes = require('./routes/vibes');
+const searchRoutes = require('./routes/search');
+const nearbyRoutes = require('./routes/nearbyVibes');
 
 const app = express();
 
@@ -46,6 +49,9 @@ app.use('/api/chats', chatsRoutes);
 app.use('/api/stories', storiesRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/vibes', vibesRoutes);
+app.use('/api/search', searchRoutes);
+app.use('/api/nearby', nearbyRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

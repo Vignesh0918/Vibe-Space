@@ -23,10 +23,12 @@ const StorySchema = new mongoose.Schema({
     required: true,
     index: true,
   },
-  viewers: {
-    type: [String], // Array of viewer UIDs
-    default: [],
-  },
+  viewers: [
+    {
+      userId: { type: String, required: true },
+      viewedAt: { type: Date, default: Date.now }
+    }
+  ],
   expiresAt: {
     type: Date,
     default: () => new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
@@ -34,6 +36,18 @@ const StorySchema = new mongoose.Schema({
   },
 }, {
   timestamps: true,
+});
+
+// Explicit schema-level TTL index to guarantee MongoDB creates it correctly
+// (inline index: { expires: 0 } can be unreliable across MongoDB versions)
+StorySchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+// Pre-save middleware: guarantee expiresAt is always populated
+StorySchema.pre('save', function(next) {
+  if (!this.expiresAt) {
+    this.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  }
+  next();
 });
 
 module.exports = mongoose.model('Story', StorySchema);

@@ -27,6 +27,26 @@ const CircleSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  avatar: {
+    type: String,
+    default: '',
+  },
+  isPublic: {
+    type: Boolean,
+    default: true,
+  },
+  inviteCode: {
+    type: String,
+    default: '',
+  },
+  tags: {
+    type: [String],
+    default: [],
+  },
+  membersCount: {
+    type: Number,
+    default: 1,
+  },
 }, {
   timestamps: true,
 });

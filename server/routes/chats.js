@@ -33,6 +33,16 @@ const setExpirySchema = z.object({
   })
 });
 
+const editMessageSchema = z.object({
+  body: z.object({
+    text: z.string().min(1),
+  }),
+  params: z.object({
+    chatId: z.string().min(1),
+    messageId: z.string().min(1),
+  })
+});
+
 // Get or create DM chat room
 router.post('/dm', authMiddleware, validate(dmChatSchema), async (req, res) => {
   try {
@@ -191,7 +201,18 @@ router.get('/user/:userId', authMiddleware, async (req, res) => {
       participants: userId
     }).sort({ 'lastMessage.createdAt': -1 });
 
-    return res.json({ success: true, data: chats });
+    const User = require('../models/User');
+    const populatedChats = [];
+
+    for (let chat of chats) {
+      const userProfiles = await User.find({ uid: { $in: chat.participants } }).select('uid username displayName photoURL isOnline lastSeen mood');
+      populatedChats.push({
+        ...chat.toObject(),
+        participantDetails: userProfiles
+      });
+    }
+
+    return res.json({ success: true, data: populatedChats });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -278,6 +299,259 @@ router.get('/unread/count', authMiddleware, async (req, res) => {
     });
 
     return res.json({ success: true, data: total });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get single chat room details
+router.get('/:chatId', authMiddleware, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat room not found' });
+    }
+    const User = require('../models/User');
+    const userProfiles = await User.find({ uid: { $in: chat.participants } }).select('uid username displayName photoURL isOnline lastSeen mood');
+    return res.json({
+      success: true,
+      data: {
+        ...chat.toObject(),
+        participantDetails: userProfiles
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update group name/avatar
+router.put('/:chatId', authMiddleware, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { name, groupAvatar } = req.body;
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    if (!chat.isGroup) {
+      return res.status(400).json({ success: false, error: 'Only group chats can be updated' });
+    }
+
+    if (name) chat.name = name;
+    if (groupAvatar !== undefined) chat.groupAvatar = groupAvatar;
+
+    await chat.save();
+    return res.json({ success: true, data: chat });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Delete or leave chat room
+router.delete('/:chatId', authMiddleware, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const userId = req.user.uid;
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    if (chat.isGroup) {
+      chat.participants = chat.participants.filter(id => id !== userId);
+      if (chat.unreadCounts) {
+        chat.unreadCounts.delete(userId);
+      }
+      
+      if (chat.participants.length === 0) {
+        await Message.deleteMany({ chatId });
+        await Chat.findByIdAndDelete(chatId);
+        return res.json({ success: true, message: 'Group deleted since all participants left' });
+      } else {
+        chat.markModified('unreadCounts');
+        await chat.save();
+        return res.json({ success: true, message: 'Left group successfully' });
+      }
+    } else {
+      await Message.deleteMany({ chatId });
+      await Chat.findByIdAndDelete(chatId);
+      return res.json({ success: true, message: 'DM deleted successfully' });
+    }
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Add member to group chat
+router.post('/:chatId/members', authMiddleware, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { userId } = req.body;
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    if (!chat.isGroup) {
+      return res.status(400).json({ success: false, error: 'Not a group chat' });
+    }
+
+    if (chat.participants.includes(userId)) {
+      return res.status(400).json({ success: false, error: 'User already in group' });
+    }
+
+    chat.participants.push(userId);
+    if (chat.unreadCounts) {
+      chat.unreadCounts.set(userId, 0);
+    }
+
+    chat.markModified('unreadCounts');
+    await chat.save();
+
+    return res.json({ success: true, data: chat });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Remove member from group chat
+router.delete('/:chatId/members/:userId', authMiddleware, async (req, res) => {
+  try {
+    const { chatId, userId } = req.params;
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    if (!chat.isGroup) {
+      return res.status(400).json({ success: false, error: 'Not a group chat' });
+    }
+
+    chat.participants = chat.participants.filter(id => id !== userId);
+    if (chat.unreadCounts) {
+      chat.unreadCounts.delete(userId);
+    }
+
+    chat.markModified('unreadCounts');
+    await chat.save();
+
+    return res.json({ success: true, data: chat });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Edit a sent message
+router.put('/:chatId/messages/:messageId', authMiddleware, validate(editMessageSchema), async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { text } = req.body;
+    const userId = req.user.uid;
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+
+    if (message.senderId !== userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const diffMs = Date.now() - message.createdAt.getTime();
+    const diffMins = diffMs / (1000 * 60);
+    if (diffMins > 15) {
+      return res.status(400).json({ success: false, error: 'Cannot edit message after 15 minutes' });
+    }
+
+    message.text = text;
+    message.isEdited = true;
+    message.editedAt = new Date();
+    await message.save();
+
+    return res.json({ success: true, data: message });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get media messages in chat
+router.get('/:chatId/media', authMiddleware, async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const mediaMessages = await Message.find({
+      chatId,
+      mediaUrl: { $ne: '' }
+    }).sort({ createdAt: -1 });
+
+    return res.json({ success: true, data: mediaMessages });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Pin a message in group chat
+router.post('/:chatId/pin/:messageId', authMiddleware, async (req, res) => {
+  try {
+    const { chatId, messageId } = req.params;
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    chat.pinnedMessageId = messageId;
+    await chat.save();
+
+    return res.json({ success: true, data: chat });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// React to a message
+router.post('/:chatId/messages/:messageId/react', authMiddleware, async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { emoji } = req.body;
+    const userId = req.user.uid;
+
+    if (!emoji) {
+      return res.status(400).json({ success: false, error: 'Emoji is required' });
+    }
+
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+
+    if (!message.reactions) {
+      message.reactions = new Map();
+    }
+
+    const userList = message.reactions.get(emoji) || [];
+    let updatedList;
+    if (userList.includes(userId)) {
+      updatedList = userList.filter(id => id !== userId);
+    } else {
+      updatedList = [...userList, userId];
+    }
+
+    if (updatedList.length === 0) {
+      message.reactions.delete(emoji);
+    } else {
+      message.reactions.set(emoji, updatedList);
+    }
+
+    message.markModified('reactions');
+    await message.save();
+
+    return res.json({ success: true, data: Object.fromEntries(message.reactions) });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }

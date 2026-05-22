@@ -12,6 +12,9 @@ const { Readable } = require('stream');
 const cloudinary = require('../config/cloudinary');
 const authMiddleware = require('../middleware/auth');
 
+const path = require('path');
+const fs = require('fs');
+
 // Configure Memory Storage to receive file as a Buffer
 const storage = multer.memoryStorage();
 
@@ -79,6 +82,32 @@ const uploadToCloudinary = (fileBuffer, folder, mimeType) => {
   });
 };
 
+/**
+ * Fallback helper to save files locally on the server and return the absolute server URL.
+ */
+const saveLocalFallback = (req, file) => {
+  const uploadsDir = path.join(__dirname, '..', 'public', 'uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+
+  const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+  let ext = path.extname(file.originalname) || '';
+  if (!ext) {
+    const mimeParts = file.mimetype.split('/');
+    ext = mimeParts[1] ? `.${mimeParts[1]}` : '.jpg';
+  }
+  const filename = `${uniqueSuffix}${ext}`;
+  const filepath = path.join(uploadsDir, filename);
+
+  fs.writeFileSync(filepath, file.buffer);
+
+  // Construct absolute URL
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  return `${protocol}://${host}/uploads/${filename}`;
+};
+
 // General media upload (profiles, posts, chats)
 router.post('/image', authMiddleware, upload.single('file'), async (req, res) => {
   try {
@@ -86,13 +115,18 @@ router.post('/image', authMiddleware, upload.single('file'), async (req, res) =>
       return res.status(400).json({ success: false, error: 'No file uploaded' });
     }
 
-    // Determine subfolder dynamically based on file type
-    const folder = req.file.mimetype.startsWith('image/') ? 'general' : 'media';
-    const uploadResult = await uploadToCloudinary(req.file.buffer, folder, req.file.mimetype);
-
-    return res.json({ success: true, data: uploadResult.secure_url });
+    try {
+      // Try Cloudinary first
+      const folder = req.file.mimetype.startsWith('image/') ? 'general' : 'media';
+      const uploadResult = await uploadToCloudinary(req.file.buffer, folder, req.file.mimetype);
+      return res.json({ success: true, data: uploadResult.secure_url });
+    } catch (cloudinaryError) {
+      console.warn('Cloudinary upload failed, falling back to local server storage:', cloudinaryError.message || cloudinaryError);
+      const localUrl = saveLocalFallback(req, req.file);
+      return res.json({ success: true, data: localUrl });
+    }
   } catch (error) {
-    console.error('Cloudinary upload error:', error);
+    console.error('Upload route error:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -104,11 +138,17 @@ router.post('/story', authMiddleware, upload.single('file'), async (req, res) =>
       return res.status(400).json({ success: false, error: 'No file uploaded' });
     }
 
-    const uploadResult = await uploadToCloudinary(req.file.buffer, 'stories', req.file.mimetype);
-
-    return res.json({ success: true, data: uploadResult.secure_url });
+    try {
+      // Try Cloudinary first
+      const uploadResult = await uploadToCloudinary(req.file.buffer, 'stories', req.file.mimetype);
+      return res.json({ success: true, data: uploadResult.secure_url });
+    } catch (cloudinaryError) {
+      console.warn('Cloudinary story upload failed, falling back to local server storage:', cloudinaryError.message || cloudinaryError);
+      const localUrl = saveLocalFallback(req, req.file);
+      return res.json({ success: true, data: localUrl });
+    }
   } catch (error) {
-    console.error('Cloudinary story upload error:', error);
+    console.error('Upload route error:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 });

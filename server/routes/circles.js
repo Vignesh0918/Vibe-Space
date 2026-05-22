@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const Circle = require('../models/Circle');
+const User = require('../models/User');
+const Post = require('../models/Post');
 const authMiddleware = require('../middleware/auth');
 const { z } = require('zod');
 const validate = require('../middleware/validate');
@@ -76,6 +78,49 @@ router.get('/user/:userId', authMiddleware, async (req, res) => {
   }
 });
 
+// Recommended circles for discovery
+router.get('/recommended', authMiddleware, async (req, res) => {
+  try {
+    const currentUserId = req.user.uid;
+    const circles = await Circle.find({
+      members: { $ne: currentUserId },
+      isPublic: true
+    }).limit(10);
+    return res.json({ success: true, data: circles });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Join circle by invite code
+router.post('/join', authMiddleware, async (req, res) => {
+  try {
+    const { inviteCode } = req.body;
+    const userId = req.user.uid;
+
+    if (!inviteCode) {
+      return res.status(400).json({ success: false, error: 'Invite code is required' });
+    }
+
+    const circle = await Circle.findOne({ inviteCode });
+    if (!circle) {
+      return res.status(404).json({ success: false, error: 'Circle not found with this invite code' });
+    }
+
+    if (circle.members.includes(userId)) {
+      return res.json({ success: true, message: 'Already a member', data: circle });
+    }
+
+    circle.members.push(userId);
+    circle.membersCount = circle.members.length;
+    await circle.save();
+
+    return res.json({ success: true, data: circle });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Get circle details
 router.get('/:circleId', authMiddleware, async (req, res) => {
   try {
@@ -142,6 +187,119 @@ router.delete('/:circleId', authMiddleware, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Circle not found' });
     }
     return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update circle details
+router.put('/:circleId', authMiddleware, async (req, res) => {
+  try {
+    const { circleId } = req.params;
+    const { name, description, type, avatar, isPublic, tags } = req.body;
+    const userId = req.user.uid;
+
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
+      return res.status(404).json({ success: false, error: 'Circle not found' });
+    }
+
+    if (circle.ownerId !== userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    if (name) circle.name = name;
+    if (description !== undefined) circle.description = description;
+    if (type) circle.type = type;
+    if (avatar !== undefined) circle.avatar = avatar;
+    if (isPublic !== undefined) circle.isPublic = isPublic;
+    if (tags !== undefined) circle.tags = tags;
+
+    await circle.save();
+    return res.json({ success: true, data: circle });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get circle posts shortcut
+router.get('/:circleId/posts', authMiddleware, async (req, res) => {
+  try {
+    const { circleId } = req.params;
+    const posts = await Post.find({ circleId }).sort({ createdAt: -1 });
+    return res.json({ success: true, data: posts });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Generate invite link / code
+router.post('/:circleId/invite', authMiddleware, async (req, res) => {
+  try {
+    const { circleId } = req.params;
+    const userId = req.user.uid;
+
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
+      return res.status(404).json({ success: false, error: 'Circle not found' });
+    }
+
+    if (circle.ownerId !== userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    if (!circle.inviteCode) {
+      circle.inviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+      await circle.save();
+    }
+
+    return res.json({ success: true, inviteCode: circle.inviteCode });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Join via specific invite code (param endpoint)
+router.post('/:circleId/join', authMiddleware, async (req, res) => {
+  try {
+    const { circleId } = req.params;
+    const { inviteCode } = req.body;
+    const userId = req.user.uid;
+
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
+      return res.status(404).json({ success: false, error: 'Circle not found' });
+    }
+
+    if (circle.inviteCode && circle.inviteCode !== inviteCode) {
+      return res.status(400).json({ success: false, error: 'Invalid invite code' });
+    }
+
+    if (circle.members.includes(userId)) {
+      return res.json({ success: true, message: 'Already a member', data: circle });
+    }
+
+    circle.members.push(userId);
+    circle.membersCount = circle.members.length;
+    await circle.save();
+
+    return res.json({ success: true, data: circle });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get circle members profiles
+router.get('/:circleId/members', authMiddleware, async (req, res) => {
+  try {
+    const { circleId } = req.params;
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
+      return res.status(404).json({ success: false, error: 'Circle not found' });
+    }
+
+    const members = await User.find({ uid: { $in: circle.members } });
+    return res.json({ success: true, data: members });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
