@@ -46,8 +46,17 @@ const editMessageSchema = z.object({
 // Get or create DM chat room
 router.post('/dm', authMiddleware, validate(dmChatSchema), async (req, res) => {
   try {
-    const { recipientId } = req.body;
+    let { recipientId } = req.body;
     const userId = req.user.uid;
+    const mongoose = require('mongoose');
+    const User = require('../models/User');
+
+    if (mongoose.Types.ObjectId.isValid(recipientId)) {
+      const userDoc = await User.findById(recipientId);
+      if (userDoc) {
+        recipientId = userDoc.uid;
+      }
+    }
 
     const participants = [userId, recipientId].sort();
     
@@ -88,8 +97,24 @@ router.post('/group', authMiddleware, validate(groupChatSchema), async (req, res
   try {
     const { name, participantIds } = req.body;
     const creatorId = req.user.uid;
+    const mongoose = require('mongoose');
+    const User = require('../models/User');
 
-    const participants = Array.from(new Set([creatorId, ...participantIds]));
+    const resolvedParticipantIds = [];
+    for (const pid of participantIds) {
+      if (mongoose.Types.ObjectId.isValid(pid)) {
+        const userDoc = await User.findById(pid);
+        if (userDoc) {
+          resolvedParticipantIds.push(userDoc.uid);
+        } else {
+          resolvedParticipantIds.push(pid);
+        }
+      } else {
+        resolvedParticipantIds.push(pid);
+      }
+    }
+
+    const participants = Array.from(new Set([creatorId, ...resolvedParticipantIds]));
     
     const unreadCounts = {};
     participants.forEach((uid) => {
@@ -123,6 +148,11 @@ router.post('/:chatId/messages', authMiddleware, validate(sendMessageSchema), as
     const chat = await Chat.findById(chatId);
     if (!chat) {
       return res.status(404).json({ success: false, error: 'Chat room not found' });
+    }
+
+    // Verify sender is participant in chat
+    if (!chat.participants.includes(senderId)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
     }
 
     const expiryHours = chat.expiryHours || 0;
@@ -166,6 +196,14 @@ router.post('/:chatId/messages', authMiddleware, validate(sendMessageSchema), as
     chat.markModified('lastMessage');
     await chat.save();
 
+    // Broadcast new message via WebSockets
+    const { sendToChatParticipants } = require('../config/websocket');
+    sendToChatParticipants(chatId, senderId, {
+      type: 'new_message',
+      chatId,
+      message: newMessage
+    });
+
     return res.status(201).json({ success: true, data: newMessage });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -176,6 +214,16 @@ router.post('/:chatId/messages', authMiddleware, validate(sendMessageSchema), as
 router.get('/:chatId/messages', authMiddleware, async (req, res) => {
   try {
     const { chatId } = req.params;
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat room not found' });
+    }
+
+    // Verify requesting user is participant in chat
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
+
     const now = new Date();
 
     const messages = await Message.find({
@@ -196,6 +244,10 @@ router.get('/:chatId/messages', authMiddleware, async (req, res) => {
 router.get('/user/:userId', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
+
+    if (userId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You cannot access other users\' chats' });
+    }
 
     const chats = await Chat.find({
       participants: userId
@@ -229,6 +281,11 @@ router.post('/:chatId/read', authMiddleware, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Chat not found' });
     }
 
+    // Verify requester is participant in chat
+    if (!chat.participants.includes(userId)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
+
     // Set unread count for user to 0
     chat.unreadCounts.set(userId, 0);
 
@@ -255,15 +312,18 @@ router.post('/:chatId/expiry', authMiddleware, validate(setExpirySchema), async 
     const { chatId } = req.params;
     const { hours } = req.body;
 
-    const chat = await Chat.findByIdAndUpdate(
-      chatId,
-      { $set: { expiryHours: hours } },
-      { new: true }
-    );
-
+    const chat = await Chat.findById(chatId);
     if (!chat) {
       return res.status(404).json({ success: false, error: 'Chat not found' });
     }
+
+    // Verify requester is participant in chat
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
+
+    chat.expiryHours = hours;
+    await chat.save();
 
     return res.json({ success: true });
   } catch (error) {
@@ -275,10 +335,26 @@ router.post('/:chatId/expiry', authMiddleware, validate(setExpirySchema), async 
 router.delete('/:chatId/messages/:messageId', authMiddleware, async (req, res) => {
   try {
     const { messageId } = req.params;
-    const deletedMessage = await Message.findByIdAndDelete(messageId);
-    if (!deletedMessage) {
+    const message = await Message.findById(messageId);
+    if (!message) {
       return res.status(404).json({ success: false, error: 'Message not found' });
     }
+
+    // Verify requester is the sender of the message
+    if (message.senderId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You cannot delete this message' });
+    }
+
+    await Message.findByIdAndDelete(messageId);
+
+    // Broadcast deleted message via WebSockets
+    const { sendToChatParticipants } = require('../config/websocket');
+    sendToChatParticipants(req.params.chatId, req.user.uid, {
+      type: 'delete_message',
+      chatId: req.params.chatId,
+      messageId
+    });
+
     return res.json({ success: true });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -312,6 +388,10 @@ router.get('/:chatId', authMiddleware, async (req, res) => {
     if (!chat) {
       return res.status(404).json({ success: false, error: 'Chat room not found' });
     }
+    // Verify requester is in the chat
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
     const User = require('../models/User');
     const userProfiles = await User.find({ uid: { $in: chat.participants } }).select('uid username displayName photoURL isOnline lastSeen mood');
     return res.json({
@@ -337,6 +417,10 @@ router.put('/:chatId', authMiddleware, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Chat not found' });
     }
 
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
+
     if (!chat.isGroup) {
       return res.status(400).json({ success: false, error: 'Only group chats can be updated' });
     }
@@ -360,6 +444,11 @@ router.delete('/:chatId', authMiddleware, async (req, res) => {
     const chat = await Chat.findById(chatId);
     if (!chat) {
       return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    // Verify requester is in the chat
+    if (!chat.participants.includes(userId)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
     }
 
     if (chat.isGroup) {
@@ -391,11 +480,24 @@ router.delete('/:chatId', authMiddleware, async (req, res) => {
 router.post('/:chatId/members', authMiddleware, async (req, res) => {
   try {
     const { chatId } = req.params;
-    const { userId } = req.body;
+    let { userId } = req.body;
+    const mongoose = require('mongoose');
+    const User = require('../models/User');
+
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      const userDoc = await User.findById(userId);
+      if (userDoc) {
+        userId = userDoc.uid;
+      }
+    }
 
     const chat = await Chat.findById(chatId);
     if (!chat) {
       return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
     }
 
     if (!chat.isGroup) {
@@ -423,15 +525,34 @@ router.post('/:chatId/members', authMiddleware, async (req, res) => {
 // Remove member from group chat
 router.delete('/:chatId/members/:userId', authMiddleware, async (req, res) => {
   try {
-    const { chatId, userId } = req.params;
+    const { chatId } = req.params;
+    let { userId } = req.params;
+    const mongoose = require('mongoose');
+    const User = require('../models/User');
+
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      const userDoc = await User.findById(userId);
+      if (userDoc) {
+        userId = userDoc.uid;
+      }
+    }
 
     const chat = await Chat.findById(chatId);
     if (!chat) {
       return res.status(404).json({ success: false, error: 'Chat not found' });
     }
 
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
+
     if (!chat.isGroup) {
       return res.status(400).json({ success: false, error: 'Not a group chat' });
+    }
+
+    // Only allow removal if the requester is the user themselves (leaving) OR the group creator
+    if (userId !== req.user.uid && chat.creatorId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: Only the group creator or the member themselves can remove this member' });
     }
 
     chat.participants = chat.participants.filter(id => id !== userId);
@@ -475,6 +596,14 @@ router.put('/:chatId/messages/:messageId', authMiddleware, validate(editMessageS
     message.editedAt = new Date();
     await message.save();
 
+    // Broadcast edited message via WebSockets
+    const { sendToChatParticipants } = require('../config/websocket');
+    sendToChatParticipants(req.params.chatId, userId, {
+      type: 'edit_message',
+      chatId: req.params.chatId,
+      message
+    });
+
     return res.json({ success: true, data: message });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -485,6 +614,14 @@ router.put('/:chatId/messages/:messageId', authMiddleware, validate(editMessageS
 router.get('/:chatId/media', authMiddleware, async (req, res) => {
   try {
     const { chatId } = req.params;
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+    // Verify requester is in the chat
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
     const mediaMessages = await Message.find({
       chatId,
       mediaUrl: { $ne: '' }
@@ -505,6 +642,11 @@ router.post('/:chatId/pin/:messageId', authMiddleware, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Chat not found' });
     }
 
+    // Verify requester is in the chat
+    if (!chat.participants.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
+    }
+
     chat.pinnedMessageId = messageId;
     await chat.save();
 
@@ -517,12 +659,22 @@ router.post('/:chatId/pin/:messageId', authMiddleware, async (req, res) => {
 // React to a message
 router.post('/:chatId/messages/:messageId/react', authMiddleware, async (req, res) => {
   try {
-    const { messageId } = req.params;
+    const { chatId, messageId } = req.params;
     const { emoji } = req.body;
     const userId = req.user.uid;
 
     if (!emoji) {
       return res.status(400).json({ success: false, error: 'Emoji is required' });
+    }
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: 'Chat not found' });
+    }
+
+    // Verify requester is in the chat
+    if (!chat.participants.includes(userId)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a participant in this chat' });
     }
 
     const message = await Message.findById(messageId);
@@ -550,6 +702,15 @@ router.post('/:chatId/messages/:messageId/react', authMiddleware, async (req, re
 
     message.markModified('reactions');
     await message.save();
+
+    // Broadcast reaction change via WebSockets
+    const { sendToChatParticipants } = require('../config/websocket');
+    sendToChatParticipants(chatId, userId, {
+      type: 'react_message',
+      chatId,
+      messageId,
+      reactions: Object.fromEntries(message.reactions)
+    });
 
     return res.json({ success: true, data: Object.fromEntries(message.reactions) });
   } catch (error) {

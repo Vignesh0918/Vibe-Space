@@ -71,6 +71,11 @@ router.post('/defaults', authMiddleware, async (req, res) => {
 router.get('/user/:userId', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
+
+    if (userId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You cannot access other users\' circles' });
+    }
+
     const circles = await Circle.find({ members: userId });
     return res.json({ success: true, data: circles });
   } catch (error) {
@@ -111,9 +116,28 @@ router.post('/join', authMiddleware, async (req, res) => {
       return res.json({ success: true, message: 'Already a member', data: circle });
     }
 
+    const joiningUser = await User.findOne({ uid: userId });
+
     circle.members.push(userId);
     circle.membersCount = circle.members.length;
     await circle.save();
+
+    if (circle.ownerId !== userId) {
+      try {
+        const Notification = require('../models/Notification');
+        const newNotification = new Notification({
+          userId: circle.ownerId,
+          type: 'circle_join',
+          senderId: userId,
+          senderName: joiningUser ? (joiningUser.displayName || joiningUser.username) : 'Someone',
+          senderAvatar: joiningUser ? (joiningUser.photoURL || '') : '',
+          text: `joined your circle "${circle.name}"`,
+        });
+        await newNotification.save();
+      } catch (notifErr) {
+        console.error('[Circle Join Notification] Error:', notifErr);
+      }
+    }
 
     return res.json({ success: true, data: circle });
   } catch (error) {
@@ -129,6 +153,12 @@ router.get('/:circleId', authMiddleware, async (req, res) => {
     if (!circle) {
       return res.status(404).json({ success: false, error: 'Circle not found' });
     }
+
+    // Verify requester is a member of the circle
+    if (!circle.members.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a member of this circle' });
+    }
+
     return res.json({ success: true, data: circle });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -141,17 +171,44 @@ router.post('/:circleId/members', authMiddleware, validate(addMemberSchema), asy
     const { circleId } = req.params;
     const { userId } = req.body;
 
-    const updatedCircle = await Circle.findByIdAndUpdate(
-      circleId,
-      { $addToSet: { members: userId } },
-      { new: true }
-    );
-
-    if (!updatedCircle) {
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
       return res.status(404).json({ success: false, error: 'Circle not found' });
     }
 
-    return res.json({ success: true, data: updatedCircle });
+    // Only the circle owner can add members
+    if (circle.ownerId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: Only the circle owner can add members' });
+    }
+
+    // Add member if not already added
+    const isNewMember = !circle.members.includes(userId);
+    if (isNewMember) {
+      circle.members.push(userId);
+    }
+    circle.membersCount = circle.members.length;
+    await circle.save();
+
+    // Notify the added user
+    if (isNewMember) {
+      try {
+        const ownerUser = await User.findOne({ uid: req.user.uid });
+        const Notification = require('../models/Notification');
+        const newNotification = new Notification({
+          userId: userId, // recipient is the added user
+          type: 'circle_join',
+          senderId: req.user.uid,
+          senderName: ownerUser ? (ownerUser.displayName || ownerUser.username) : 'Owner',
+          senderAvatar: ownerUser ? (ownerUser.photoURL || '') : '',
+          text: `added you to circle "${circle.name}"`,
+        });
+        await newNotification.save();
+      } catch (notifErr) {
+        console.error('[Circle Add Member Notification] Error:', notifErr);
+      }
+    }
+
+    return res.json({ success: true, data: circle });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -162,17 +219,21 @@ router.delete('/:circleId/members/:userId', authMiddleware, async (req, res) => 
   try {
     const { circleId, userId } = req.params;
 
-    const updatedCircle = await Circle.findByIdAndUpdate(
-      circleId,
-      { $pull: { members: userId } },
-      { new: new Circle }
-    );
-
-    if (!updatedCircle) {
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
       return res.status(404).json({ success: false, error: 'Circle not found' });
     }
 
-    return res.json({ success: true });
+    // Only the circle owner or the member themselves can remove the member
+    if (circle.ownerId !== req.user.uid && userId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: Unauthorized' });
+    }
+
+    circle.members = circle.members.filter(id => id !== userId);
+    circle.membersCount = circle.members.length;
+    await circle.save();
+
+    return res.json({ success: true, data: circle });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -182,10 +243,18 @@ router.delete('/:circleId/members/:userId', authMiddleware, async (req, res) => 
 router.delete('/:circleId', authMiddleware, async (req, res) => {
   try {
     const { circleId } = req.params;
-    const deletedCircle = await Circle.findByIdAndDelete(circleId);
-    if (!deletedCircle) {
+
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
       return res.status(404).json({ success: false, error: 'Circle not found' });
     }
+
+    // Only circle owner can delete the circle
+    if (circle.ownerId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: Only the owner can delete this circle' });
+    }
+
+    await Circle.findByIdAndDelete(circleId);
     return res.json({ success: true });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -226,6 +295,17 @@ router.put('/:circleId', authMiddleware, async (req, res) => {
 router.get('/:circleId/posts', authMiddleware, async (req, res) => {
   try {
     const { circleId } = req.params;
+
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
+      return res.status(404).json({ success: false, error: 'Circle not found' });
+    }
+
+    // Verify requester is a member of the circle
+    if (!circle.members.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a member of this circle' });
+    }
+
     const posts = await Post.find({ circleId }).sort({ createdAt: -1 });
     return res.json({ success: true, data: posts });
   } catch (error) {
@@ -279,9 +359,28 @@ router.post('/:circleId/join', authMiddleware, async (req, res) => {
       return res.json({ success: true, message: 'Already a member', data: circle });
     }
 
+    const joiningUser = await User.findOne({ uid: userId });
+
     circle.members.push(userId);
     circle.membersCount = circle.members.length;
     await circle.save();
+
+    if (circle.ownerId !== userId) {
+      try {
+        const Notification = require('../models/Notification');
+        const newNotification = new Notification({
+          userId: circle.ownerId,
+          type: 'circle_join',
+          senderId: userId,
+          senderName: joiningUser ? (joiningUser.displayName || joiningUser.username) : 'Someone',
+          senderAvatar: joiningUser ? (joiningUser.photoURL || '') : '',
+          text: `joined your circle "${circle.name}"`,
+        });
+        await newNotification.save();
+      } catch (notifErr) {
+        console.error('[Circle Join Notification] Error:', notifErr);
+      }
+    }
 
     return res.json({ success: true, data: circle });
   } catch (error) {
@@ -296,6 +395,11 @@ router.get('/:circleId/members', authMiddleware, async (req, res) => {
     const circle = await Circle.findById(circleId);
     if (!circle) {
       return res.status(404).json({ success: false, error: 'Circle not found' });
+    }
+
+    // Verify requester is a member of the circle
+    if (!circle.members.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a member of this circle' });
     }
 
     const members = await User.find({ uid: { $in: circle.members } });

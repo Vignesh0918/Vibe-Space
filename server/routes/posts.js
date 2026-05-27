@@ -78,25 +78,12 @@ router.post('/', authMiddleware, validate(createPostSchema), async (req, res) =>
   }
 });
 
-// Get home feed (all posts from a set of circleIds)
+// Get home feed (all posts from any user in the database)
 router.get('/feed', authMiddleware, async (req, res) => {
   try {
-    const { circleIds, lastId, limit = 10 } = req.query;
-
-    if (!circleIds) {
-      return res.json({ success: true, data: { posts: [], lastDoc: null } });
-    }
-
-    const parsedCircleIds = Array.isArray(circleIds)
-      ? circleIds
-      : circleIds.split(',').filter(Boolean);
-
-    if (parsedCircleIds.length === 0) {
-      return res.json({ success: true, data: { posts: [], lastDoc: null } });
-    }
-
+    const { lastId, limit = 10 } = req.query;
     const limitCount = parseInt(limit);
-    const query = { circleId: { $in: parsedCircleIds } };
+    const query = {};
 
     if (lastId) {
       const lastPost = await Post.findById(lastId);
@@ -127,6 +114,17 @@ router.get('/feed', authMiddleware, async (req, res) => {
 router.get('/circle/:circleId', authMiddleware, async (req, res) => {
   try {
     const { circleId } = req.params;
+
+    const circle = await Circle.findById(circleId);
+    if (!circle) {
+      return res.status(404).json({ success: false, error: 'Circle not found' });
+    }
+
+    // Verify requester is a member of the circle
+    if (!circle.members.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a member of this circle' });
+    }
+
     const { lastId, limit = 10 } = req.query;
     const limitCount = parseInt(limit);
 
@@ -161,7 +159,16 @@ router.get('/circle/:circleId', authMiddleware, async (req, res) => {
 router.get('/user/:userId', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
-    const posts = await Post.find({ userId }).sort({ createdAt: -1 });
+    
+    let query = { userId };
+    if (userId !== req.user.uid) {
+      // Find all circles where req.user.uid is a member
+      const userCircles = await Circle.find({ members: req.user.uid }).select('_id');
+      const validCircleIds = userCircles.map(c => c._id.toString());
+      query.circleId = { $in: validCircleIds };
+    }
+
+    const posts = await Post.find(query).sort({ createdAt: -1 });
     return res.json({ success: true, data: posts });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -290,6 +297,11 @@ router.delete('/:postId', authMiddleware, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Post not found' });
     }
 
+    // Only the post owner can delete the post
+    if (post.userId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You do not own this post' });
+    }
+
     // Decrement counts
     await User.findOneAndUpdate({ uid: post.userId }, { $inc: { postsCount: -1 } });
     await Circle.findByIdAndUpdate(post.circleId, { $inc: { postsCount: -1 } });
@@ -310,6 +322,11 @@ router.delete('/:postId', authMiddleware, async (req, res) => {
 router.get('/bookmarked/:userId', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
+
+    if (userId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You cannot access other users\' bookmarks' });
+    }
+
     const posts = await Post.find({ bookmarkedBy: userId }).sort({ createdAt: -1 });
     return res.json({ success: true, data: posts });
   } catch (error) {

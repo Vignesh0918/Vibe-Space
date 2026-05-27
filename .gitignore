@@ -43,3 +43,4 @@ yarn-error.*
 # environment variables
 .env
 
+graphify-out/

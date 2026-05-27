@@ -12,7 +12,20 @@
                     "package_name": "com.vicky.vibespace"
                 }
             },
-            "oauth_client": [],
+            "oauth_client": [
+                {
+                    "client_id": "625209346750-f431ptpj87mdfs47ed5srr6pq5oc42bq.apps.googleusercontent.com",
+                    "client_type": 1,
+                    "android_info": {
+                        "package_name": "com.vicky.vibespace",
+                        "certificate_hash": "b175d873d71347fdef5322923c5ef9144ee78d7e"
+                    }
+                },
+                {
+                    "client_id": "625209346750-11rrjo6a5fduuekjth1t8f3v3gh287np.apps.googleusercontent.com",
+                    "client_type": 3
+                }
+            ],
             "api_key": [
                 {
                     "current_key": "AIzaSyD_URvweQQt2-tUaOk2aFnyfAoh74vxrQU"
@@ -20,7 +33,12 @@
             ],
             "services": {
                 "appinvite_service": {
-                    "other_platform_oauth_client": []
+                    "other_platform_oauth_client": [
+                        {
+                            "client_id": "625209346750-11rrjo6a5fduuekjth1t8f3v3gh287np.apps.googleusercontent.com",
+                            "client_type": 3
+                        }
+                    ]
                 }
             }
         }

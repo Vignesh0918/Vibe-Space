@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Circle = require('../models/Circle');
 const Post = require('../models/Post');
@@ -8,6 +9,16 @@ const authMiddleware = require('../middleware/auth');
 const { z } = require('zod');
 const validate = require('../middleware/validate');
 
+// Helper to resolve parameter to Firebase UID if it is a MongoDB ObjectId
+const resolveUserId = async (id) => {
+  if (!id) return id;
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    const user = await User.findById(id);
+    return user ? user.uid : id;
+  }
+  return id;
+};
+
 const updateMoodSchema = z.object({
   body: z.object({
     mood: z.string().min(1)
@@ -15,8 +26,11 @@ const updateMoodSchema = z.object({
 });
 
 const followSchema = z.object({
+  params: z.object({
+    userId: z.string().min(1)
+  }),
   body: z.object({
-    targetUserId: z.string().min(1)
+    targetUserId: z.string().min(1).optional()
   }).optional()
 });
 
@@ -29,6 +43,7 @@ const createUserSchema = z.object({
     photoURL: z.string().optional().nullable(),
     bio: z.string().optional().nullable(),
     mood: z.string().optional().nullable(),
+    email: z.string().email().optional().nullable(),
   })
 });
 
@@ -38,12 +53,6 @@ const onlineStatusSchema = z.object({
   })
 });
 
-const locationSchema = z.object({
-  body: z.object({
-    latitude: z.number(),
-    longitude: z.number(),
-  })
-});
 
 // Check if username is available
 router.get('/check-username/:username', async (req, res) => {
@@ -67,7 +76,7 @@ router.get('/check-username/:username', async (req, res) => {
 // Create user profile
 router.post('/', authMiddleware, validate(createUserSchema), async (req, res) => {
   try {
-    const { username, displayName, photoURL, bio, mood } = req.body;
+    const { username, displayName, photoURL, bio, mood, email } = req.body;
     const userId = req.user.uid;
     const cleanUsername = username.trim().toLowerCase();
     
@@ -90,6 +99,7 @@ router.post('/', authMiddleware, validate(createUserSchema), async (req, res) =>
       photoURL,
       bio,
       mood,
+      email: email ? email.trim().toLowerCase() : undefined,
       isOnline: true,
       lastSeen: new Date(),
     });
@@ -178,7 +188,8 @@ router.get('/recommended', authMiddleware, async (req, res) => {
 // Get user profile
 router.get('/:userId', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ uid: req.params.userId });
+    const targetUid = await resolveUserId(req.params.userId);
+    const user = await User.findOne({ uid: targetUid });
     if (!user) {
       return res.status(404).json({ success: false, error: 'Profile not found' });
     }
@@ -191,13 +202,13 @@ router.get('/:userId', authMiddleware, async (req, res) => {
 // Update user profile
 router.put('/:userId', authMiddleware, async (req, res) => {
   try {
-    const { userId } = req.params;
-    if (req.user.uid !== userId) {
+    const targetUid = await resolveUserId(req.params.userId);
+    if (req.user.uid !== targetUid) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
 
     const updatedUser = await User.findOneAndUpdate(
-      { uid: userId },
+      { uid: targetUid },
       { $set: req.body },
       { new: true }
     );
@@ -215,11 +226,11 @@ router.put('/:userId', authMiddleware, async (req, res) => {
 // Update online status
 router.post('/:userId/online', authMiddleware, validate(onlineStatusSchema), async (req, res) => {
   try {
-    const { userId } = req.params;
+    const targetUid = await resolveUserId(req.params.userId);
     const { isOnline } = req.body;
 
     const updatedUser = await User.findOneAndUpdate(
-      { uid: userId },
+      { uid: targetUid },
       { 
         $set: { 
           isOnline,
@@ -239,63 +250,12 @@ router.post('/:userId/online', authMiddleware, validate(onlineStatusSchema), asy
   }
 });
 
-// Update user location
-router.post('/location', authMiddleware, validate(locationSchema), async (req, res) => {
-  try {
-    const { latitude, longitude } = req.body;
-    const userId = req.user.uid;
-
-    const updatedUser = await User.findOneAndUpdate(
-      { uid: userId },
-      {
-        $set: {
-          location: {
-            type: 'Point',
-            coordinates: [parseFloat(longitude), parseFloat(latitude)] // longitude first in GeoJSON
-          }
-        }
-      },
-      { new: true }
-    );
-
-    return res.json({ success: true, data: updatedUser });
-  } catch (error) {
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Query nearby users
-router.get('/nearby/search', authMiddleware, async (req, res) => {
-  try {
-    const { latitude, longitude, maxDistance = 10000 } = req.query; // default 10km
-    
-    if (!latitude || !longitude) {
-      return res.status(400).json({ success: false, error: 'Latitude and longitude are required' });
-    }
-
-    const users = await User.find({
-      location: {
-        $near: {
-          $geometry: {
-            type: 'Point',
-            coordinates: [parseFloat(longitude), parseFloat(latitude)]
-          },
-          $maxDistance: parseInt(maxDistance)
-        }
-      },
-      uid: { $ne: req.user.uid } // Exclude self
-    });
-
-    return res.json({ success: true, data: users });
-  } catch (error) {
-    return res.status(500).json({ success: false, error: error.message });
-  }
-});
 
 // Get user posts alias
 router.get('/:userId/posts', authMiddleware, async (req, res) => {
   try {
-    const posts = await Post.find({ userId: req.params.userId }).sort({ createdAt: -1 });
+    const targetUid = await resolveUserId(req.params.userId);
+    const posts = await Post.find({ userId: targetUid }).sort({ createdAt: -1 });
     return res.json({ success: true, data: posts });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -305,13 +265,13 @@ router.get('/:userId/posts', authMiddleware, async (req, res) => {
 // Update mood status only
 router.put('/:userId/mood', authMiddleware, validate(updateMoodSchema), async (req, res) => {
   try {
-    const { userId } = req.params;
-    if (req.user.uid !== userId) {
+    const targetUid = await resolveUserId(req.params.userId);
+    if (req.user.uid !== targetUid) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
     const { mood } = req.body;
     const updatedUser = await User.findOneAndUpdate(
-      { uid: userId },
+      { uid: targetUid },
       { $set: { mood } },
       { new: true }
     );
@@ -327,10 +287,10 @@ router.put('/:userId/mood', authMiddleware, validate(updateMoodSchema), async (r
 // Get user stats
 router.get('/:userId/stats', authMiddleware, async (req, res) => {
   try {
-    const { userId } = req.params;
-    const postsCount = await Post.countDocuments({ userId });
-    const circlesCount = await Circle.countDocuments({ members: userId });
-    const vibesCount = await Vibe.countDocuments({ userId });
+    const targetUid = await resolveUserId(req.params.userId);
+    const postsCount = await Post.countDocuments({ userId: targetUid });
+    const circlesCount = await Circle.countDocuments({ members: targetUid });
+    const vibesCount = await Vibe.countDocuments({ userId: targetUid });
     return res.json({
       success: true,
       data: { postsCount, circlesCount, vibesCount }
@@ -343,12 +303,12 @@ router.get('/:userId/stats', authMiddleware, async (req, res) => {
 // Soft delete account
 router.delete('/:userId', authMiddleware, async (req, res) => {
   try {
-    const { userId } = req.params;
-    if (req.user.uid !== userId) {
+    const targetUid = await resolveUserId(req.params.userId);
+    if (req.user.uid !== targetUid) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
     const updatedUser = await User.findOneAndUpdate(
-      { uid: userId },
+      { uid: targetUid },
       { $set: { isDeactivated: true } },
       { new: true }
     );
@@ -364,7 +324,8 @@ router.delete('/:userId', authMiddleware, async (req, res) => {
 // Follow a user
 router.post('/:userId/follow', authMiddleware, validate(followSchema), async (req, res) => {
   try {
-    const targetUserId = req.params.userId || req.body.targetUserId;
+    let targetUserId = req.params.userId || req.body.targetUserId;
+    targetUserId = await resolveUserId(targetUserId);
     const currentUserId = req.user.uid;
 
     if (targetUserId === currentUserId) {
@@ -387,6 +348,29 @@ router.post('/:userId/follow', authMiddleware, validate(followSchema), async (re
       return res.status(404).json({ success: false, error: 'Target user not found' });
     }
 
+    // Create Notification
+    try {
+      const Notification = require('../models/Notification');
+      const existingNotif = await Notification.findOne({
+        userId: targetUserId,
+        type: 'follow',
+        senderId: currentUserId
+      });
+      if (!existingNotif) {
+        const newNotification = new Notification({
+          userId: targetUserId,
+          type: 'follow',
+          senderId: currentUserId,
+          senderName: user.displayName || user.username,
+          senderAvatar: user.photoURL || '',
+          text: 'started following you',
+        });
+        await newNotification.save();
+      }
+    } catch (notifErr) {
+      console.error('[Follow Notification] Error:', notifErr);
+    }
+
     return res.json({ success: true, data: { user, target } });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
@@ -396,7 +380,7 @@ router.post('/:userId/follow', authMiddleware, validate(followSchema), async (re
 // Unfollow a user
 router.delete('/:userId/follow', authMiddleware, async (req, res) => {
   try {
-    const targetUserId = req.params.userId;
+    const targetUserId = await resolveUserId(req.params.userId);
     const currentUserId = req.user.uid;
 
     await User.findOneAndUpdate(
@@ -418,7 +402,8 @@ router.delete('/:userId/follow', authMiddleware, async (req, res) => {
 // Get followers
 router.get('/:userId/followers', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ uid: req.params.userId });
+    const targetUid = await resolveUserId(req.params.userId);
+    const user = await User.findOne({ uid: targetUid });
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
@@ -432,12 +417,101 @@ router.get('/:userId/followers', authMiddleware, async (req, res) => {
 // Get following
 router.get('/:userId/following', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findOne({ uid: req.params.userId });
+    const targetUid = await resolveUserId(req.params.userId);
+    const user = await User.findOne({ uid: targetUid });
     if (!user) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
     const following = await User.find({ uid: { $in: user.following || [] } });
     return res.json({ success: true, data: following });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get user profile by email
+router.get('/email/:email', authMiddleware, async (req, res) => {
+  try {
+    const email = req.params.email.trim().toLowerCase();
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'Profile not found' });
+    }
+    return res.json({ success: true, data: user });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Sync user UID with a new Firebase UID (restoring profile access)
+router.post('/sync-uid', authMiddleware, async (req, res) => {
+  try {
+    const { email } = req.body;
+    const newUid = req.user.uid;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail });
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'Profile not found' });
+    }
+
+    // Security check: if Firebase user has an email, verify it matches
+    if (req.user.email && req.user.email.toLowerCase() !== cleanEmail) {
+      return res.status(403).json({ success: false, error: 'Forbidden: Email mismatch.' });
+    }
+
+    const oldUid = user.uid;
+    if (oldUid !== newUid) {
+      // Update the user UID in MongoDB
+      user.uid = newUid;
+      await user.save();
+
+      // Update followers and following in User collection
+      await User.updateMany({ followers: oldUid }, { $set: { "followers.$": newUid } });
+      await User.updateMany({ following: oldUid }, { $set: { "following.$": newUid } });
+
+      // Update ownerId in circles
+      await Circle.updateMany({ ownerId: oldUid }, { $set: { ownerId: newUid } });
+
+      // Update members list in circles
+      await Circle.updateMany({ members: oldUid }, { $set: { "members.$": newUid } });
+
+      // Cascade updates to all other models (Posts, Comments, Stories, Vibes, Notifications, Messages, Chats)
+      try {
+        const Comment = require('../models/Comment');
+        const Story = require('../models/Story');
+        const Chat = require('../models/Chat');
+        const Message = require('../models/Message');
+        const Notification = require('../models/Notification');
+
+        await Post.updateMany({ userId: oldUid }, { $set: { userId: newUid } });
+        await Post.updateMany({ bookmarkedBy: oldUid }, { $set: { "bookmarkedBy.$": newUid } });
+        await Comment.updateMany({ userId: oldUid }, { $set: { userId: newUid } });
+        await Story.updateMany({ userId: oldUid }, { $set: { userId: newUid } });
+        await Story.updateMany({ "viewers.userId": oldUid }, { $set: { "viewers.$.userId": newUid } });
+        await Vibe.updateMany({ userId: oldUid }, { $set: { userId: newUid } });
+        await Notification.updateMany({ userId: oldUid }, { $set: { userId: newUid } });
+        await Notification.updateMany({ senderId: oldUid }, { $set: { senderId: newUid } });
+        await Message.updateMany({ senderId: oldUid }, { $set: { senderId: newUid } });
+        await Message.updateMany({ readBy: oldUid }, { $set: { "readBy.$": newUid } });
+
+        // Update Chat
+        await Chat.updateMany({ creatorId: oldUid }, { $set: { creatorId: newUid } });
+        await Chat.updateMany({ adminIds: oldUid }, { $set: { "adminIds.$": newUid } });
+        await Chat.updateMany({ participants: oldUid }, { $set: { "participants.$": newUid } });
+        await Chat.updateMany({ "lastMessage.senderId": oldUid }, { $set: { "lastMessage.senderId": newUid } });
+        await Chat.updateMany({ "lastMessage.readBy": oldUid }, { $set: { "lastMessage.readBy.$": newUid } });
+      } catch (cascadeError) {
+        console.error('[User Sync Cascade] Warning: some cascade updates failed:', cascadeError);
+      }
+      
+      console.log(`[User Sync] Linked profile of ${cleanEmail} from old UID ${oldUid} to new UID ${newUid}`);
+    }
+
+    return res.json({ success: true, data: user });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }

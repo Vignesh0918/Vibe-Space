@@ -32,6 +32,13 @@ router.post('/', authMiddleware, validate(createStorySchema), async (req, res) =
     const { userName, userAvatar, mediaUrl, circleId } = req.body;
     const userId = req.user.uid;
 
+    // Verify user is a member of the circle
+    const Circle = require('../models/Circle');
+    const circle = await Circle.findById(circleId);
+    if (!circle || !circle.members.includes(userId)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a member of this circle' });
+    }
+
     // Auto-expires in 24 hours
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
@@ -53,27 +60,20 @@ router.post('/', authMiddleware, validate(createStorySchema), async (req, res) =
   }
 });
 
-// Fetch active stories for circles (grouped by poster)
+// Fetch active stories for followed users (grouped by poster)
 router.get('/circles', authMiddleware, async (req, res) => {
   try {
-    const { circleIds } = req.query;
+    const currentUserId = req.user.uid;
+    const currentUser = await User.findOne({ uid: currentUserId });
+    const following = currentUser ? currentUser.following : [];
 
-    if (!circleIds) {
-      return res.json({ success: true, data: [] });
-    }
-
-    const parsedCircleIds = Array.isArray(circleIds)
-      ? circleIds
-      : circleIds.split(',').filter(Boolean);
-
-    if (parsedCircleIds.length === 0) {
-      return res.json({ success: true, data: [] });
-    }
+    // Include the user's own stories as well
+    const targetUserIds = [...following, currentUserId];
 
     const now = new Date();
-    // Query active stories (mongo TTL also runs, but checking expiresAt explicitly is safest)
+    // Query active stories
     const activeStories = await Story.find({
-      circleId: { $in: parsedCircleIds },
+      userId: { $in: targetUserIds },
       expiresAt: { $gt: now },
     }).sort({ createdAt: -1 });
 
@@ -120,10 +120,20 @@ router.get('/user/:userId', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
     const now = new Date();
-    const stories = await Story.find({
+
+    let query = {
       userId,
       expiresAt: { $gt: now }
-    }).sort({ createdAt: 1 });
+    };
+
+    if (userId !== req.user.uid) {
+      const Circle = require('../models/Circle');
+      const userCircles = await Circle.find({ members: req.user.uid }).select('_id');
+      const validCircleIds = userCircles.map(c => c._id.toString());
+      query.circleId = { $in: validCircleIds };
+    }
+
+    const stories = await Story.find(query).sort({ createdAt: 1 });
 
     return res.json({ success: true, data: stories });
   } catch (error) {
@@ -175,14 +185,21 @@ router.get('/:storyId/viewers', authMiddleware, async (req, res) => {
 });
 
 // Record that a user has viewed a story
-router.post('/:storyId/view', authMiddleware, validate(viewStorySchema), async (req, res) => {
+router.post('/:storyId/view', authMiddleware, async (req, res) => {
   try {
     const { storyId } = req.params;
-    const { userId } = req.body;
+    const userId = req.user.uid;
 
     const story = await Story.findById(storyId);
     if (!story) {
       return res.status(404).json({ success: false, error: 'Story not found' });
+    }
+
+    // Verify requester has access to the circle this story is in
+    const Circle = require('../models/Circle');
+    const circle = await Circle.findById(story.circleId);
+    if (!circle || !circle.members.includes(userId)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You do not have access to this story' });
     }
 
     // Check if expired
@@ -221,6 +238,14 @@ router.get('/:storyId', authMiddleware, async (req, res) => {
     if (new Date() > new Date(story.expiresAt)) {
       return res.status(404).json({ success: false, error: 'Story has expired' });
     }
+
+    // Verify requester has access to the circle this story is in
+    const Circle = require('../models/Circle');
+    const circle = await Circle.findById(story.circleId);
+    if (!circle || !circle.members.includes(req.user.uid)) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You do not have access to this story' });
+    }
+
     return res.json({ success: true, data: story });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });

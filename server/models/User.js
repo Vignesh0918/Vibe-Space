@@ -7,6 +7,12 @@ const UserSchema = new mongoose.Schema({
     unique: true,
     index: true,
   },
+  email: {
+    type: String,
+    lowercase: true,
+    trim: true,
+    index: true,
+  },
   username: {
     type: String,
     required: true,
@@ -63,22 +69,8 @@ const UserSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
-  location: {
-    type: {
-      type: String,
-      enum: ['Point'],
-      default: 'Point',
-    },
-    coordinates: {
-      type: [Number], // [longitude, latitude]
-      default: [0, 0],
-    },
-  },
 }, {
   timestamps: true,
 });
-
-// Spatial index for location
-UserSchema.index({ location: '2dsphere' });
 
 module.exports = mongoose.model('User', UserSchema);

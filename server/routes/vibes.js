@@ -27,6 +27,16 @@ router.post('/', authMiddleware, validate(createVibeSchema), async (req, res) =>
       return res.status(404).json({ success: false, error: 'User profile not found' });
     }
 
+    // Verify user is a member of all specified circles
+    const Circle = require('../models/Circle');
+    const memberCirclesCount = await Circle.countDocuments({
+      _id: { $in: circleIds },
+      members: userId
+    });
+    if (memberCirclesCount !== circleIds.length) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You are not a member of all specified circles' });
+    }
+
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h expiration
 
     const newVibe = new Vibe({
@@ -57,6 +67,11 @@ router.post('/', authMiddleware, validate(createVibeSchema), async (req, res) =>
 router.get('/feed/:userId', authMiddleware, async (req, res) => {
   try {
     const { userId } = req.params;
+
+    if (userId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You cannot access other users\' vibe feeds' });
+    }
+
     const now = new Date();
 
     // Find all circles this user is a member of
@@ -118,6 +133,16 @@ router.post('/:vibeId/react', authMiddleware, async (req, res) => {
       return res.status(404).json({ success: false, error: 'Vibe not found' });
     }
 
+    // Verify requester has access to the vibe via circle membership
+    const Circle = require('../models/Circle');
+    const sharedCircle = await Circle.findOne({
+      _id: { $in: vibe.circleIds },
+      members: userId
+    });
+    if (!sharedCircle && vibe.userId !== userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You do not have access to this vibe' });
+    }
+
     if (!vibe.reactions) {
       vibe.reactions = new Map();
     }
@@ -153,6 +178,17 @@ router.get('/:vibeId', authMiddleware, async (req, res) => {
     if (!vibe) {
       return res.status(404).json({ success: false, error: 'Vibe not found' });
     }
+
+    // Verify requester has access to the vibe via circle membership
+    const Circle = require('../models/Circle');
+    const sharedCircle = await Circle.findOne({
+      _id: { $in: vibe.circleIds },
+      members: req.user.uid
+    });
+    if (!sharedCircle && vibe.userId !== req.user.uid) {
+      return res.status(403).json({ success: false, error: 'Forbidden: You do not have access to this vibe' });
+    }
+
     return res.json({ success: true, data: vibe });
   } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
