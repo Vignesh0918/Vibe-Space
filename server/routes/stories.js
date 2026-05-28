@@ -12,6 +12,13 @@ const createStorySchema = z.object({
     userAvatar: z.string().optional().nullable(),
     mediaUrl: z.string().url(),
     circleId: z.string().min(1),
+    song: z.object({
+      trackId: z.any().optional(),
+      title: z.string().min(1),
+      artist: z.string().min(1),
+      artwork: z.string().optional().nullable(),
+      previewUrl: z.string().optional().nullable(),
+    }).optional().nullable(),
   })
 });
 
@@ -29,7 +36,7 @@ const activeStoriesFilter = () => ({
 // Create a new story
 router.post('/', authMiddleware, validate(createStorySchema), async (req, res) => {
   try {
-    const { userName, userAvatar, mediaUrl, circleId } = req.body;
+    const { userName, userAvatar, mediaUrl, circleId, song } = req.body;
     const userId = req.user.uid;
 
     // Verify user is a member of the circle
@@ -51,6 +58,7 @@ router.post('/', authMiddleware, validate(createStorySchema), async (req, res) =
       circleId,
       viewers: [],
       expiresAt,
+      song: song || undefined,
     });
 
     await newStory.save();

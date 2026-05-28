@@ -34,6 +34,13 @@ const StorySchema = new mongoose.Schema({
     default: () => new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
     index: { expires: 0 }, // Automatically delete when expired
   },
+  song: {
+    trackId: String,
+    title: String,
+    artist: String,
+    artwork: String,
+    previewUrl: String,
+  },
 }, {
   timestamps: true,
 });
