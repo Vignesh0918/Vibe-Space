@@ -24,6 +24,5 @@ jobs:
 
       - name: Deploy to Railway
         run: railway up --service Vibe-Space
-        working-directory: server
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
