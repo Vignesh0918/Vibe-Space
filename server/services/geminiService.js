@@ -1,7 +1,7 @@
 /**
  * geminiService.js
  * Central service for all Gemini AI interactions in VibeSpace.
- * Uses Google's Gemini 1.5 Flash (free tier) for content generation.
+ * Uses Google's Gemini 1.5/2.5 Flash for content generation with auto-retries and fallback support.
  */
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
@@ -44,20 +44,52 @@ function ensureModel() {
   }
 }
 
+/**
+ * Calls Gemini API with automatic retry and exponential backoff for transient errors (429/503).
+ * Falls back to preset mock data if all retries fail to keep the app working.
+ */
+async function callGeminiWithRetry(args, fallbackData) {
+  ensureModel();
+
+  const maxRetries = 3;
+  let delay = 1000; // Start with 1 second delay
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await model.generateContent(args);
+      const text = result.response.text();
+      return parseGeminiJSON(text);
+    } catch (error) {
+      const isTransient = error.status === 429 || error.status === 503 || 
+                          error.message.includes('429') || error.message.includes('503') ||
+                          error.message.includes('quota') || error.message.includes('overloaded');
+
+      console.warn(`[Gemini] Attempt ${attempt} failed:`, error.message);
+
+      if (isTransient && attempt < maxRetries) {
+        console.log(`[Gemini] Transient error detected. Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; // Exponential backoff
+      } else {
+        console.error(`[Gemini] Final attempt failed or non-transient error:`, error.message);
+        if (fallbackData) {
+          console.log(`[Gemini] Returning fallback data to prevent crash.`);
+          return fallbackData;
+        }
+        throw error;
+      }
+    }
+  }
+}
+
 // ─────────────────────────────────────────────
 // 1️⃣ AI Caption Generator (Photo Upload)
 // ─────────────────────────────────────────────
 
 /**
  * Analyzes an image and generates captions, hashtags, and mood.
- * @param {string} imageBase64 - Base64-encoded image data.
- * @param {string} mimeType - Image MIME type (e.g. 'image/jpeg').
- * @param {string} circleType - Circle context (Friends/Family/Work/Secret).
- * @returns {Promise<{caption, hashtags, mood, alt_captions}>}
  */
 async function generateCaption(imageBase64, mimeType, circleType = 'Friends') {
-  ensureModel();
-
   const prompt = `You are a creative social media assistant for VibeSpace, 
 a premium dark-themed social app used by young Indians.
 
@@ -85,9 +117,25 @@ Response ONLY in this JSON format:
     },
   };
 
-  const result = await model.generateContent([prompt, imagePart]);
-  const text = result.response.text();
-  return parseGeminiJSON(text);
+  // Define static fallback captions based on the circleType
+  const defaultCaption = circleType === 'Family' ? "Family time is the best time. ❤️" :
+                         circleType === 'Work' ? "On the grind. 💼💻" :
+                         circleType === 'Secret' ? "Low key, high vibes. 🤫✨" :
+                         "Chilling with the squad! 🌟";
+
+  const defaultHashtags = circleType === 'Family' ? ["#family", "#love", "#together", "#vibespace"] :
+                          circleType === 'Work' ? ["#worklife", "#hustle", "#office", "#vibespace"] :
+                          circleType === 'Secret' ? ["#secret", "#lowkey", "#private", "#vibespace"] :
+                          ["#vibes", "#goodtimes", "#aesthetic", "#vibespace"];
+
+  const fallback = {
+    caption: defaultCaption,
+    hashtags: defaultHashtags,
+    mood: circleType === 'Family' ? "❤️" : circleType === 'Work' ? "💻" : circleType === 'Secret' ? "🤫" : "🔥",
+    alt_captions: ["Keeping it real. ✨", "Living my best life. 💫"]
+  };
+
+  return callGeminiWithRetry([prompt, imagePart], fallback);
 }
 
 // ─────────────────────────────────────────────
@@ -96,14 +144,8 @@ Response ONLY in this JSON format:
 
 /**
  * Generates 3 smart reply suggestions for a chat message.
- * @param {string} lastMessage - The last message received.
- * @param {string} senderName - Name of the message sender.
- * @param {boolean} isGroup - Whether this is a group chat.
- * @returns {Promise<{replies: Array<{text, type}>}>}
  */
 async function suggestReplies(lastMessage, senderName, isGroup = false) {
-  ensureModel();
-
   const prompt = `You are a smart reply assistant for VibeSpace chat.
 
 Analyze this conversation and suggest 3 short, natural reply options.
@@ -130,9 +172,15 @@ Response ONLY in this JSON format:
   ]
 }`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  return parseGeminiJSON(text);
+  const fallback = {
+    replies: [
+      { text: "Sounds good!", type: "casual" },
+      { text: "Haha true 😂", type: "funny" },
+      { text: "What do you think?", type: "question" }
+    ]
+  };
+
+  return callGeminiWithRetry(prompt, fallback);
 }
 
 // ─────────────────────────────────────────────
@@ -141,12 +189,8 @@ Response ONLY in this JSON format:
 
 /**
  * Detects mood/emotion from a post caption.
- * @param {string} userCaption - The post caption to analyze.
- * @returns {Promise<{detected_mood, mood_emoji, confidence, should_update_profile, vibe_comment, secondary_mood}>}
  */
 async function detectMood(userCaption) {
-  ensureModel();
-
   const prompt = `You are a mood analysis assistant for VibeSpace.
 
 Analyze this social media post caption and detect the user's current mood/emotion.
@@ -164,10 +208,10 @@ Available moods in our app:
 - Traveling ✈️
 
 Tasks:
-1. Detect primary mood from caption
-2. Give confidence score (0-100)
-3. Suggest if they should update their profile mood
-4. Give a fun one-line comment about their vibe
+- Detect primary mood
+- Confidence score (0-100)
+- Suggest if profile should update
+- Fun one-line vibe comment
 
 Response ONLY in this JSON format:
 {
@@ -179,9 +223,44 @@ Response ONLY in this JSON format:
   "secondary_mood": "Hyped"
 }`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  return parseGeminiJSON(text);
+  // Smart localized keywords detection for fallback
+  const captionLower = (userCaption || '').toLowerCase();
+  let detected_mood = "Chill";
+  let mood_emoji = "😇";
+  let vibe_comment = "Keeping it chill and positive! ✨";
+
+  if (captionLower.includes('tired') || captionLower.includes('sleep') || captionLower.includes('exhausted')) {
+    detected_mood = "Tired";
+    mood_emoji = "😴";
+    vibe_comment = "Looks like you need some well-deserved rest! 😴";
+  } else if (captionLower.includes('hype') || captionLower.includes('fire') || captionLower.includes('lit') || captionLower.includes('party')) {
+    detected_mood = "Hyped";
+    mood_emoji = "🔥";
+    vibe_comment = "The energy is absolutely unmatched! 🔥";
+  } else if (captionLower.includes('stress') || captionLower.includes('work') || captionLower.includes('exam') || captionLower.includes('dead')) {
+    detected_mood = "Stressed";
+    mood_emoji = "🤯";
+    vibe_comment = "Take a deep breath. You've got this! 🌟";
+  } else if (captionLower.includes('code') || captionLower.includes('programming') || captionLower.includes('bug')) {
+    detected_mood = "Coding";
+    mood_emoji = "💻";
+    vibe_comment = "In the zone! Time to squash some bugs. 💻";
+  } else if (captionLower.includes('travel') || captionLower.includes('flight') || captionLower.includes('trip')) {
+    detected_mood = "Traveling";
+    mood_emoji = "✈️";
+    vibe_comment = "Safe travels! Catch those beautiful sights. ✈️";
+  }
+
+  const fallback = {
+    detected_mood,
+    mood_emoji,
+    confidence: 80,
+    should_update_profile: true,
+    vibe_comment,
+    secondary_mood: "Happy"
+  };
+
+  return callGeminiWithRetry(prompt, fallback);
 }
 
 // ─────────────────────────────────────────────
@@ -190,15 +269,8 @@ Response ONLY in this JSON format:
 
 /**
  * Generates creative circle name suggestions.
- * @param {string} circleType - Type of circle.
- * @param {string} selectedEmoji - Emoji chosen by user.
- * @param {string} privacy - Privacy level (Open/Invite Only/Secret).
- * @param {number} memberCount - Expected member count.
- * @returns {Promise<{suggestions: Array<{name, vibe, emoji_match}>, best_pick}>}
  */
 async function generateCircleNames(circleType, selectedEmoji, privacy, memberCount) {
-  ensureModel();
-
   const prompt = `You are a creative naming assistant for VibeSpace social circles.
 
 Generate creative circle names based on:
@@ -222,23 +294,50 @@ Response ONLY in this JSON format:
       "vibe": "mysterious and cool",
       "emoji_match": "✨"
     },
-    {
-      "name": "The Inner Circle", 
-      "vibe": "exclusive and premium",
-      "emoji_match": "🔥"
-    },
-    {
-      "name": "Cosmic Squad",
-      "vibe": "fun and energetic", 
-      "emoji_match": "🚀"
-    }
+    ...
   ],
   "best_pick": "Neon Nights"
 }`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  return parseGeminiJSON(text);
+  const emoji = selectedEmoji || '✨';
+  let suggestions = [
+    { name: `The Vibe Lounge ${emoji}`, vibe: "chill and casual space", emoji_match: emoji },
+    { name: `Inner Circle ${emoji}`, vibe: "exclusive squad room", emoji_match: emoji },
+    { name: `Chat & Chill ${emoji}`, vibe: "relaxed general group", emoji_match: emoji }
+  ];
+
+  if (circleType === 'Friends') {
+    suggestions = [
+      { name: `The Dream Team ${emoji}`, vibe: "close squad vibes", emoji_match: emoji },
+      { name: `Chai & Chats ${emoji}`, vibe: "daily fun discussions", emoji_match: emoji },
+      { name: `Vibe Check ${emoji}`, vibe: "casual hangouts", emoji_match: emoji }
+    ];
+  } else if (circleType === 'Family') {
+    suggestions = [
+      { name: `Fam Jam ${emoji}`, vibe: "close family updates", emoji_match: emoji },
+      { name: `Home Sweet Home ${emoji}`, vibe: "family connection room", emoji_match: emoji },
+      { name: `The Clan ${emoji}`, vibe: "exclusive family space", emoji_match: emoji }
+    ];
+  } else if (circleType === 'Work') {
+    suggestions = [
+      { name: `Coffee & Code ${emoji}`, vibe: "professional and relaxed", emoji_match: emoji },
+      { name: `Brainstormers ${emoji}`, vibe: "creative ideas hub", emoji_match: emoji },
+      { name: `The Boardroom ${emoji}`, vibe: "official group updates", emoji_match: emoji }
+    ];
+  } else if (circleType === 'Secret') {
+    suggestions = [
+      { name: `Under the Radar ${emoji}`, vibe: "super private talk", emoji_match: emoji },
+      { name: `The Vault ${emoji}`, vibe: "highly confidential room", emoji_match: emoji },
+      { name: `For Your Eyes Only ${emoji}`, vibe: "restricted access circle", emoji_match: emoji }
+    ];
+  }
+
+  const fallback = {
+    suggestions,
+    best_pick: suggestions[0].name
+  };
+
+  return callGeminiWithRetry(prompt, fallback);
 }
 
 // ─────────────────────────────────────────────
@@ -247,12 +346,8 @@ Response ONLY in this JSON format:
 
 /**
  * Generates a fun daily summary of user activity.
- * @param {object} activityData - Activity stats object.
- * @returns {Promise<{summary, highlight, motivation, day_rating}>}
  */
 async function generateDailySummary(activityData) {
-  ensureModel();
-
   const {
     followersCount = 0,
     reactionsCount = 0,
@@ -289,9 +384,14 @@ Response ONLY in this JSON format:
   "day_rating": "🔥 Lit Day"
 }`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  return parseGeminiJSON(text);
+  const fallback = {
+    summary: `You had an awesome day on VibeSpace! You gained ${followersCount} new followers and were active in ${circlesActive} circle${circlesActive !== 1 ? 's' : ''}. Keep sharing your vibe!`,
+    highlight: `Active engagement with your circles.`,
+    motivation: `Every connection brings a new vibe. Keep shining! 🚀`,
+    day_rating: "🔥 Lit Day"
+  };
+
+  return callGeminiWithRetry(prompt, fallback);
 }
 
 // ─────────────────────────────────────────────
@@ -300,15 +400,8 @@ Response ONLY in this JSON format:
 
 /**
  * Generates catchy titles for nearby vibe bubbles.
- * @param {string} vibeEmoji - Selected emoji for the vibe.
- * @param {string} locationHint - Location context (or 'Unknown').
- * @param {string} timeOfDay - Morning/Afternoon/Evening/Night.
- * @param {string[]} userTags - Tags entered by the user.
- * @returns {Promise<{suggestions: string[], best_match: string}>}
  */
 async function suggestVibeTitles(vibeEmoji, locationHint, timeOfDay, userTags) {
-  ensureModel();
-
   const prompt = `You are a creative vibe naming assistant for VibeSpace Nearby Vibes feature.
 
 Generate catchy titles for a nearby vibe bubble based on:
@@ -336,9 +429,19 @@ Response ONLY in this JSON format:
   "best_match": "Late Night Coffee Run"
 }`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
-  return parseGeminiJSON(text);
+  const emoji = vibeEmoji || '📍';
+  const fallback = {
+    suggestions: [
+      `Spontaneous Hangout ${emoji}`,
+      `Chill Session ${emoji}`,
+      `Vibe Check ${emoji}`,
+      `Coffee & Chats ${emoji}`,
+      `Nearby Hangout ${emoji}`
+    ],
+    best_match: `Spontaneous Hangout ${emoji}`
+  };
+
+  return callGeminiWithRetry(prompt, fallback);
 }
 
 module.exports = {
